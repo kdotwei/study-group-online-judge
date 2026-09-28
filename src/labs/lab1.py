@@ -240,7 +240,7 @@ def gpt2_complete(
                         finished[i] = True
             
             input_ids = torch.cat((input_ids, next_ids[:, None]), dim=1)
-            attention_mask = torch.cat((attention_mask, active[:, None].to(dtype=attention_mask)), dim=1)
+            attention_mask = torch.cat((attention_mask, active[:, None].to(dtype=attention_mask.dtype)), dim=1)
     
     # Decode
     completions = [tokenizer.decode(ids, skip_special_tokens=True) for ids in generated]
