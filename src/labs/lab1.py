@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -48,26 +49,13 @@ class CausalSelfAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1,2)
         v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1,2)
         
-        # QK Trans.
-        attn_scores = q @ k.transpose(-1, -2)
-        # scale = torch.full([], self.head_dim**0.5, dtype=attn_scores.dtype, device=attn_scores.device)
-        # attn_scores = attn_scores / scale
-        attn_scores = attn_scores / math.sqrt(self.head_dim)
-        
-        # Casual Mask
+        # SDPA Mask
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device))
-        mask_value = torch.full([], torch.finfo(attn_scores.dtype).min, dtype=attn_scores.dtype, device=attn_scores.device)
-        attn_scores = torch.where(causal_mask[None, None, :, :], attn_scores, mask_value)
-        
-        # Padding Mask
         key_mask = attention_mask[:, None, None, :].bool()
-        attn_scores = torch.where(key_mask, attn_scores, mask_value)
-        
-        # Softmax & Attention Probability
-        attn_probs = torch.softmax(attn_scores, dim=-1)
+        attn_mask = (causal_mask[None, None, :, :] & key_mask)
+        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
         
         # Merge Output
-        output = attn_probs @ v
         output = (
             output
             .transpose(1, 2)
