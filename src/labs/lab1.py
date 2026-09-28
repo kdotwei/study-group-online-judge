@@ -50,8 +50,9 @@ class CausalSelfAttention(nn.Module):
         
         # QK Trans.
         attn_scores = q @ k.transpose(-1, -2)
-        scale = torch.full([], self.head_dim**0.5, dtype=attn_scores.dtype, device=attn_scores.device)
-        attn_scores = attn_scores / scale
+        # scale = torch.full([], self.head_dim**0.5, dtype=attn_scores.dtype, device=attn_scores.device)
+        # attn_scores = attn_scores / scale
+        attn_scores = attn_scores / math.sqrt(self.head_dim)
         
         # Casual Mask
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device))
