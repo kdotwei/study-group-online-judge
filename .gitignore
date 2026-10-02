@@ -220,3 +220,8 @@ __marimo__/
 # Judge runtime state
 /data/
 /work/
+
+# Training artifacts
+trainings/
+runs/
+data-lab4/
