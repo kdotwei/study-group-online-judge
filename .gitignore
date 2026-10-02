@@ -225,3 +225,5 @@ __marimo__/
 trainings/
 runs/
 data-lab4/
+slurm-out/
+slurm-err/
