@@ -6,7 +6,6 @@
 #SBATCH --gpus-per-node=2
 #SBATCH --time=0:30:00
 #SBATCH --output=/work/u9216411/cerulean-labs/study-group-online-judge/slurm-out/%j-%x.out
-#SBATCH --error=/work/u9216411/cerulean-labs/study-group-online-judge/slurm-err/%j-%x.err
 
 echo "========================================"
 echo "Start Time: $(date '+%Y-%m-%d %H:%M:%S')"

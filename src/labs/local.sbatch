@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #SBATCH --account=ACD115198
-#SBATCH --partition=8gpus
+#SBATCH --partition=dev
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=24
 #SBATCH --gpus-per-node=2
-#SBATCH --time=0:30:00
+#SBATCH --time=4:00:00
 #SBATCH --output=/work/u9216411/cerulean-labs/study-group-online-judge/slurm-out/%j-%x.out
-#SBATCH --error=/work/u9216411/cerulean-labs/study-group-online-judge/slurm-err/%j-%x.err
+
+set -euo pipefail
 
 echo "========================================"
 echo "Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 START_TIME=$(date +%s)
-set -euo pipefail
 
 module purge
 module load cuda/13.0
@@ -20,7 +20,8 @@ module load cuda/13.0
 PROJECT_ROOT="/work/u9216411/cerulean-labs/study-group-online-judge"
 cd "$PROJECT_ROOT"
 
-uv run --no-sync python src/labs/check-env.py
+uv sync --no-sources --no-dev
+uv run --no-sync python src/labs/lab4-tokenize.py
 
 END_TIME=$(date +%s)
 echo "========================================"
