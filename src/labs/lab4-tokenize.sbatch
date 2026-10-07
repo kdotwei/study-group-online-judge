@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 #SBATCH --account=ACD115198
-#SBATCH --partition=8gpus
+#SBATCH --partition=dev
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-node=2
-#SBATCH --time=0:30:00
+#SBATCH --cpus-per-task=12
+#SBATCH --gpus-per-node=1
+#SBATCH --time=4:00:00
 #SBATCH --output=/work/u9216411/cerulean-labs/study-group-online-judge/slurm-out/%j-%x.out
+
+set -euo pipefail
+
+export EXPERIMENT=prologue
 
 echo "========================================"
 echo "Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 START_TIME=$(date +%s)
-set -euo pipefail
 
 module purge
 module load cuda/13.0
 
-cd "$JUDGE_SUBMISSION_DIR"
-export PYTHONPATH="$JUDGE_TRUSTED_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+PROJECT_ROOT="/work/u9216411/cerulean-labs/study-group-online-judge"
+cd "$PROJECT_ROOT"
 
 uv sync --no-sources --no-dev
-uv run --no-sync python -u -m judge.run_task \
-  --task "$JUDGE_TASK_ID" \
-  --submission "$JUDGE_SUBMISSION_DIR" \
-  --output "$JUDGE_OUTPUT_DIR/result.json"
+uv run --no-sync python src/labs/lab4-tokenize.py
 
 END_TIME=$(date +%s)
 echo "========================================"
