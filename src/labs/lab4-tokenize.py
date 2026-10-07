@@ -1,10 +1,17 @@
+import os
 from transformers import AutoTokenizer
 from datasets import load_dataset, Dataset
+from lab4_config import SEQ_LEN, TOKENIZER_DIR, get_data_profile
 
-tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+experiment = os.environ.get("EXPERIMENT", "spark")
+profile = get_data_profile(experiment)
+TARGET_TOKENS = profile["target_tokens"]
+output_path = profile["path"]
 
-SEQ_LEN = 1024
-TARGET_TOKENS = 240_000_000
+if output_path.exists():
+    raise FileExistsError(f"Dataset already exists: {output_path}")
+
+tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_DIR), local_file_only=True)
 
 def generate_blocks():
     dataset = load_dataset("allenai/c4", "en", split="train", streaming=True)
@@ -30,4 +37,4 @@ tokenized = Dataset.from_generator(generate_blocks)
 print("blocks:", len(tokenized))
 print("tokens:", len(tokenized) * SEQ_LEN)
 
-tokenized.save_to_disk("data-lab4/c4-tokenized")
+tokenized.save_to_disk(str(output_path))

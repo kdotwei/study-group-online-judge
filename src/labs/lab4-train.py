@@ -56,11 +56,14 @@ model = GPT2LMHeadModel(config)
 # Set up training arguments
 print("Setting up training arguments...")
 os.environ["WANDB_PROJECT"] = "gpt2-training"
+experiment = os.environ.get["EXPERIMENT", "spark-e1"]
+job_id = os.environ.get["SLURM_JOB_ID", "local"]
+run_name = f"{experiment}-{job_id}"
 
 training_args = TrainingArguments(
-    output_dir="trainings/lab4-gpt2",
-    run_name=f"lab4-kwei-{os.environ.get('SLURM_JOB_ID', 'local')}",
-    num_train_epochs=1,
+    output_dir=f"trainings/lab4/{run_name}",
+    run_name=run_name,
+    num_train_epochs=2,
     per_device_train_batch_size=16,
     gradient_accumulation_steps=16,
     learning_rate=2.5e-4,

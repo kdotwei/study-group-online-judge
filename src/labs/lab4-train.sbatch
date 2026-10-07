@@ -14,6 +14,7 @@ export OMP_NUM_THREADS=8
 export TOKENIZERS_PARALLELISM=false
 export WANDB_PROJECT=gpt2-training
 export WANDB_MODE=online
+export EXPERIMENT=prologue
 
 echo "========================================"
 echo "Start Time: $(date '+%Y-%m-%d %H:%M:%S')"

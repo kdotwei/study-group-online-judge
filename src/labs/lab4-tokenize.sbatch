@@ -9,6 +9,8 @@
 
 set -euo pipefail
 
+export EXPERIMENT=prologue
+
 echo "========================================"
 echo "Start Time: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
