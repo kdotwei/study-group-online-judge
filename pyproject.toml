@@ -12,6 +12,7 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
     "huggingface-hub[cli]>=0.36.2",
     "pydantic>=2.13.5",
+    "playwright>=1.58,<2",
     "python-dotenv>=1.2.3",
     "safetensors>=0.7,<1",
     "torch>=2.10,<2.12",
