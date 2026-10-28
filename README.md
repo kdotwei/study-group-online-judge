@@ -44,6 +44,33 @@ The submission workflow prints the queued job ID and a link to its W&B run in
 the run summary. The link becomes active when the judge starts reporting. Open
 it for progress, logs, metrics, and the final pass/fail result.
 
+## Node.js security updates
+
+The UI build stages pin Node.js **22.23.4** for the
+[October 21, 2026 security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+The standalone UI serves static files through nginx, so its final image has no
+Node server. The Python judge does include Node: Playwright's wheel bundles a
+driver runtime used for browser installation and leaderboard screenshots.
+The judge image replaces that bundled executable with a symlink to Node.js
+**24.22.1** and sets Playwright's supported `PLAYWRIGHT_NODEJS_PATH` override.
+This patches the driver without changing the locked browser version.
+
+After updating the checkout, rebuild and recreate the default services:
+
+```sh
+docker compose build --pull api leaderboard
+docker compose up -d --no-deps --force-recreate api leaderboard
+docker compose exec api node --version
+docker compose exec api /app/.venv/bin/python -c 'from playwright._impl._driver import compute_driver_executable; import subprocess; subprocess.run([compute_driver_executable()[0], "--version"], check=True)'
+docker compose ps
+```
+
+Both version checks must report `v24.22.1`. If the opt-in submission workers
+are enabled, recreate those consumers of the judge image too, using the normal
+submission deployment procedure. Preserve data volumes and secrets. Verify the
+leaderboard and a screenshot after deployment. This is a source/image assessment;
+running production versions require verification on the deployment host.
+
 ## Contributors
 
 ### Defining tasks
@@ -90,21 +117,47 @@ The perplexity evaluator supports causal language models loadable by
 `tokenizer_id` to use a fixed tokenizer for a lab. Lab 4 uses
 `openai-community/gpt2`; Lab 5 evaluates Llama 3.2 models with the tokenizer
 from [`meta-llama/Llama-3.2-1B`](https://huggingface.co/meta-llama/Llama-3.2-1B)
-and batches of one document with an 8,192-token limit. The generic evaluator
-defaults to 1,024 tokens, configurable through `max_length` and capped by the
-model's declared context length. Existing tokenizer padding tokens are preserved;
-otherwise EOS is used for padding. Padding stays on the right and is excluded
-from scoring.
+and bfloat16 FlashAttention-2 with whole documents greedily packed into an
+8,192-token budget. Documents are tokenized once, truncated to 8,192 tokens,
+and use independent attention and reset position IDs. Cross-document next-token
+targets are excluded; real EOS tokens are scored. Float32 cross-entropy uses
+2,048-token chunks. The evaluator explicitly selects
+`attn_implementation="kernels-community/flash-attn2"`; it uses the prebuilt Hub
+kernel through `kernels` without requiring the `flash-attn` package. Lab 5
+submission setup resolves the trusted judge's complete runtime requirements
+from `pyproject.toml` into the participant's `.venv`, including for older commits.
+The install is constrained to the exact versions in the prepared trusted
+environment, preserving its resolved CUDA stack and excluding the judge project
+itself from the constraints. Participant-only packages remain installed.
+Transformers 5, Hub 1, PyTorch 2, and Datasets 4 are required. It runs `uv pip check`
+and imports the evaluator and kernel integration with that same interpreter
+before submitting to Slurm; installed versions are recorded in `setup.log`.
+Model compilation uses
+`dynamic=True, fullgraph=True`.
+
+After changing runtime dependencies, run `uv sync --frozen`, `uv pip check`,
+`python -m judge.check_runtime`, and the test suite locally. Validate the same
+full-runtime installation against an older participant environment; installing
+a single new package is insufficient to establish compatibility.
+Lab 4 retains padded batches and truncates to its tokenizer's maximum length.
+Existing tokenizer padding tokens and padding side are preserved; otherwise EOS
+is used for padding. Padding is excluded from both the loss and token count,
+including next-token pairs whose preceding position is padding.
+Evaluation logs show the cumulative corpus perplexity and a token-weighted rolling
+perplexity over the latest 1,000 scored documents every 30 seconds during scoring,
+and once at completion. Both use `exp(sum(loss) / sum(scored tokens))`.
 
 ### Lab 5 submission
 
 Shuffle the entire `train` split of `allenai/dolma3_mix-150B-1025` with seed 42
 and reserve the last **50,000 documents** before tokenization or packing. Exclude
 all of those documents from training. Participants may use at most **10,000**
-of them for periodic validation. The OJ evaluates all 50,000, truncating each
-document to its first 8,192 tokenizer tokens; it does not pack documents or use
-sliding windows. The corpus score weights each non-padding next-token target
-equally, with document p90/p99 reported separately.
+of them for periodic validation. The OJ loads the already shuffled and filtered
+`train` split of `cerulean-works/study-group-lab5-eval` directly, without shuffling
+or selecting another tail. It evaluates all 50,000, truncating and packing as
+described above. The corpus score weights each valid next-token target equally,
+with document p90/p99 reported separately. Documents with fewer than two tokens
+are counted as skipped.
 
 Train the Llama 3.2 1B architecture from randomly initialized weights with an
 8,192-token training context. Upload both weights and tokenizer to Hugging Face.
@@ -154,8 +207,26 @@ uv run ty check
 uv run python -m pytest -q tests
 ```
 
-The API exposes `GET /healthz`, `POST /submissions`, and `GET /jobs/{job_id}`.
-Submission and job routes require `Authorization: Bearer <JUDGE_API_TOKEN>`.
+Screenshot tests are marked `screenshot` and skipped by default, including in CI.
+To run them locally, build the UI and install Chromium, then opt in explicitly:
+
+```console
+npm ci --prefix ui && npm run build --prefix ui
+uv run playwright install --with-deps --only-shell chromium
+uv run python -m pytest -q tests --run-screenshots -m screenshot
+```
+
+The API exposes `GET /healthz` and public `GET /api/leaderboard` by default.
+`JUDGE_ALLOW_CODE_SUBMISSIONS` defaults to `false`: the submission router is not
+registered, so `POST /submissions` and `GET /jobs/{job_id}` are absent from the
+API and OpenAPI documentation. CPU/SSH workers exit without processing
+queued jobs. Leaderboard fetching, display, and notifications remain available;
+no submission token, W&B key, or remote judge configuration is needed for this mode.
+The flag is read at startup, so restart the API and workers after changing it.
+Existing Slurm jobs that were already dispatched must be managed separately.
+
+Set `JUDGE_ALLOW_CODE_SUBMISSIONS=true` to enable the submission system.
+Submission and job routes then require `Authorization: Bearer <JUDGE_API_TOKEN>`.
 GPU submissions additionally require an `Idempotency-Key`. Successful submission
 means the job is persisted locally, not that Slurm has accepted it. The job ID
 and W&B run ID remain stable when the same request is retried. Reusing a key
@@ -171,8 +242,30 @@ one configured Slurm login node. A separate SSH worker prepares submissions
 and monitors them; the remote helper publishes logs and results directly to W&B
 using a credential stored on that node.
 
-Copy `.env.example` to `.env` and set the API token, W&B credentials, and remote
-configuration. Each new GPU job fetches the latest default-branch version of
+Copy `.env.example` to `.env` and configure the Flock leaderboard credentials.
+`docker compose up -d --build` starts the `api` and standalone `leaderboard`
+services by default. The leaderboard serves HTTP on container port `80`;
+point your reverse proxy at that service. Its Nginx proxy forwards `/api/`
+requests to `JUDGE_API_URL`, defaulting to `http://judge-leaderboard-api:8000`
+on the Compose network. Set `JUDGE_API_URL` in `.env` to use another OJ HTTP or HTTPS origin,
+without a path or trailing slash. After changing it, run
+`docker compose up -d --force-recreate leaderboard`; no image rebuild is needed.
+
+The default uses an alias assigned only to the API's private Compose network.
+On hosts such as Dokploy, the UI can also join a shared ingress network where
+another application's `api` hostname would otherwise receive these requests.
+For an existing deployment using `JUDGE_API_URL=http://api:8000`, remove that
+override or change it to `http://judge-leaderboard-api:8000`, then redeploy both
+`api` and `leaderboard` so the API receives its new network alias. Keep explicit
+HTTP or HTTPS origins when intentionally using an external OJ.
+
+For code submissions, also set `JUDGE_ALLOW_CODE_SUBMISSIONS=true`, the API token,
+W&B credentials, and remote configuration, then start the worker services with
+`docker compose --profile submissions up -d --build`.
+To switch an existing deployment to leaderboard-only mode, set the flag to `false`,
+run `docker compose --profile submissions stop worker ssh-worker tailscale`, and
+recreate the API with `docker compose up -d --force-recreate api`.
+Each new GPU job fetches the latest default-branch version of
 `JUDGE_REPO_URL` for its evaluator. No `JUDGE_REVISION` setting is required.
 Push evaluator updates to that branch before submitting jobs that should use them.
 
@@ -233,13 +326,30 @@ docker compose ps
 docker compose logs --follow api worker ssh-worker tailscale
 ```
 
+GPU execution diagnostics are enabled at INFO level. Follow job receipt in
+`api` and execution in `ssh-worker` with:
+
+```console
+docker compose logs --follow api ssh-worker
+```
+
+Each event includes the judge `job_id`; scheduler events also include the
+`slurm_job_id` once assigned. Logs cover worker dispatch, SSH destination and
+operation, elapsed time, retries, remote setup, `sbatch` commands/responses,
+`sacct` commands/responses (the current status poller), accounting delays,
+terminal results, and pending W&B reporting. Remote diagnostics use stderr
+and are forwarded into the SSH worker logs; stdout remains the JSON snapshot.
+Captured diagnostics are limited to 8 KiB per field and configured credentials
+are redacted. SSH request bodies and environment dumps are not logged. Detailed
+dependency setup output remains in the remote job's `output/setup.log`.
+
 Compose does not publish the API on a host port. Configure Dokploy or your
 reverse proxy to reach the `api` service on port `8000`. SQLite and W&B files
 persist in `judge-data`; local CPU caches use the HF and uv cache volumes.
 The SSH worker has neither W&B credentials nor the Docker socket. Remote
 commands receive job configuration, never the submission token, Tailscale
 auth key, or the local W&B key. The local `WANDB_API_KEY` remains necessary for
-CPU reporting and API leaderboard reads.
+CPU reporting. API leaderboard reads use a separate Flock API key.
 
 Create `<JUDGE_REMOTE_WORK_ROOT>/.netrc` manually on the remote login node:
 
@@ -376,7 +486,7 @@ Messages are paced to Slack's webhook limits and honor `Retry-After` backoff.
 If the service was offline on previous days, it sends only today's summary.
 
 PNG cards are Chromium screenshots of the actual React leaderboard, using its
-CSS, fonts, GitHub avatars, scores, attempt counts, and Taipei submission times.
+CSS, fonts, Flock or GitHub avatars, scores, attempt counts, and Taipei submission times.
 The UI receives the same frozen snapshot as the message. Images are saved in
 `leaderboard-images/` next to the database before their bytes are uploaded to
 Slack. The Docker image includes the built UI and Chromium. For a Python-only
@@ -385,11 +495,100 @@ then run `playwright install --with-deps --only-shell chromium`. Set `JUDGE_UI_D
 to the built UI directory if needed, and `JUDGE_CHROMIUM_EXECUTABLE` to use an
 existing Chromium installation.
 
-The OJ frontend opens the lab with the highest lab number by default and keeps
-the user's selected lab during refreshes.
+The frontend lists the midterm first, then labs from highest to lowest number,
+opens the first board by default, and keeps a manual selection during refreshes.
+It uses bundled Host Grotesk throughout and chooses one of 106 greetings per visit.
 
-The API container also needs `WANDB_API_KEY`: workers publish submissions, while
-`api` independently reads W&B for the leaderboard. Compose's `.env` supplies
-interpolation values; it does not automatically inject every variable into every
-container. After updating `compose.yaml` or `.env`, recreate the API with
-`docker compose up -d --force-recreate api` so it receives the new environment.
+### Flock leaderboards and the midterm
+
+All leaderboard reads use Flock's [REST API](https://docs.cerulean.works).
+Configure these variables on the API service (also listed in `.env.example`):
+
+| Variable | Meaning |
+| --- | --- |
+| `JUDGE_FLOCK_API_URL` | Required API origin, without `/api/v1`. |
+| `JUDGE_FLOCK_TOKEN` | Required CLI token (`flock_cli_…`) of a member of the organization, from `flock token`. Kept server-side. |
+| `JUDGE_FLOCK_WEB_URL` | Browser-accessible dashboard origin for project/run links and avatars; defaults to the API origin. |
+| `JUDGE_FLOCK_ENTITY` | Organization; defaults to `cerulean-labs`. |
+| `JUDGE_FLOCK_LABS_PROJECT` | Judged runs; defaults to `study-group-labs`. |
+| `JUDGE_FLOCK_MIDTERM_PROJECT` | Training runs; defaults to `midterm-nanogpt`. |
+
+Flock's authentication split limits W&B/API keys (including older `flock-…`
+keys) to the W&B protocol. They now receive HTTP 401 on the REST endpoints used
+by the leaderboard. Replacing an old key with a new W&B key does not restore access.
+
+To migrate an existing deployment:
+
+1. Sign in to Flock as a member of `JUDGE_FLOCK_ENTITY` using the Flock CLI:
+   `flock login --host https://flock-api.cerulean.works --no-wandb`.
+   Use your own API origin if different. This sign-in requires browser approval.
+2. Run `flock token --host https://flock-api.cerulean.works` and put the returned
+   CLI token into the API service's `JUDGE_FLOCK_TOKEN` deployment secret.
+   Treat it as a password; keep it out of source control and logs.
+3. Rebuild and recreate the API service (`docker compose up -d --build api`).
+   Check its logs for `Flock refresh succeeded` and the leaderboard's `updated_at`.
+
+`JUDGE_FLOCK_API_KEY` remains a deprecated fallback variable, but its value must
+also be a CLI token. `JUDGE_FLOCK_TOKEN` takes precedence. The API container does
+not need the Flock CLI installed or a mounted credentials file. CLI sessions
+extend their expiry on use (90 days by default); if a sign-in is revoked or
+expires, sign in again, replace the deployment secret, and recreate the API.
+Manage this sign-in under **Command line sign-ins** on the Flock account page.
+
+Midterm participants use their Flock member name and avatar, matched by the run's
+owner ID. Avatar paths are resolved against `JUDGE_FLOCK_WEB_URL`, whose dashboard
+serves `/api/v1/avatars/*` publicly without an API key. Set this URL when the API
+origin is internal. Missing or failed images show initials. Lab participants keep
+their `config.github_actor` identity and GitHub avatar; the run's Flock owner may
+be a shared judge account.
+
+Ensure judged lab runs are available in the Flock labs project (for example,
+through Flock's W&B importer). A project that has not been created yet shows an
+empty board without preventing the other project's results from loading.
+The existing lab publishers still write to W&B; this change switches leaderboard
+reads only. Lab reads require `summary.judge_status = "completed"`, along with
+the existing `config.task_id` and `config.github_actor` metadata. Ranking rules
+are unchanged. Workers retain their W&B credentials for reporting.
+
+The midterm is a leaderboard only: it is not registered as a task and accepts no
+model upload or OJ submission. Participants log their training directly to
+Flock's `cerulean-labs/midterm-nanogpt` project using their own Flock API key.
+Flock supports the W&B SDK; set `WANDB_BASE_URL` to the Flock API origin and
+`WANDB_API_KEY` to the participant's Flock key. For example:
+
+```python
+import wandb
+
+with wandb.init(entity="cerulean-labs", project="midterm-nanogpt") as run:
+    # Train and validate using the track's fixed architecture, data and batch size.
+    # Replace these variables with the final values from that run.
+    run.summary["total_train_steps"] = final_training_steps
+    run.summary["val_loss"] = final_validation_loss
+```
+
+A run qualifies when its Flock state is `finished`, `total_train_steps` is a
+finite positive integer, and final `val_loss` is finite, nonnegative and **below
+3.28**, as required by the [Track 3 rules](https://github.com/KellerJordan/modded-nanogpt/blob/master/records/track_3_optimization/README.md).
+Both fields must be summaries, not only history metrics. Runs are grouped by
+Flock owner ID and displayed with the member's name. Missing/deleted owners are
+excluded; duplicate display names remain separate. The fewest steps wins, with
+earlier run creation time and then run ID breaking ties. Validation loss is
+shown alongside the winning step count.
+
+Use **8 × H200**, with at most **80 GB per GPU**. The automatic memory check uses
+an 80 GiB byte threshold (`80 * 1024**3`) and inspects every available
+`system.gpu.<index>.memoryAllocatedBytes` sample from Flock, without downsampling.
+A single sample above that limit excludes the run. Missing system telemetry does
+not prove compliance: hardware, architecture/data/batch-size rules, and memory
+usage without telemetry still require organizer review. Keep system monitoring
+enabled throughout the run.
+
+The server fetches every page of both run tables. Source failures retain the
+last successful snapshot and show a generic error. Refresh logs include the
+failure stage and a traceback with the Flock API key redacted. A cached W&B
+snapshot is not reused after the source switch.
+
+Compose's `.env` supplies interpolation values; it does not automatically inject
+every variable into every container. After updating `compose.yaml` or `.env`,
+recreate the API with `docker compose up -d --force-recreate api` so it receives
+the Flock configuration.

@@ -2,12 +2,16 @@
 
 FROM tailscale/tailscale:latest AS tailscale
 
-FROM node:22-alpine AS ui-build
+FROM node:22.23.4-alpine AS ui-build
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 COPY ui ./
 RUN npm run build
+
+# Playwright's Python wheel bundles its own Node runtime. Use a patched glibc
+# binary for the driver as well as patched Alpine builders for the static UI.
+FROM node:24.22.1-bookworm-slim AS playwright-node
 
 FROM python:3.14-slim AS base
 
@@ -45,7 +49,12 @@ RUN apt-get update \
     && chown -R judge:judge /data /home/judge/.cache
 
 COPY --from=build --chown=judge:judge /app/.venv /app/.venv
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+COPY --from=playwright-node /usr/local/bin/node /usr/local/bin/node
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
+# Replace the vulnerable bundled executable too, including the default driver path.
+RUN /app/.venv/bin/python -c "from pathlib import Path; import playwright; p = Path(playwright.__file__).parent / 'driver' / 'node'; p.unlink(); p.symlink_to('/usr/local/bin/node')" \
+    && test "$(node --version)" = "v24.22.1"
 RUN /app/.venv/bin/playwright install --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ui-build --chown=judge:judge /ui/dist /app/ui/dist
